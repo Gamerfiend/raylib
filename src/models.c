@@ -994,6 +994,7 @@ ModelAnimation *LoadModelAnimations(const char *filename, int *animCount)
         float framerate;
         unsigned int flags;
     } IQMAnim;
+    IQMHeader iqm;
 
     FILE *iqmFile = NULL;
     IQMHeader iqm;
@@ -1005,7 +1006,7 @@ ModelAnimation *LoadModelAnimations(const char *filename, int *animCount)
         TRACELOG(LOG_WARNING, "FILEIO: [%s] Failed to open file", filename);
         return NULL;
     }
-
+    
     // Read IQM header
     fread(&iqm, sizeof(IQMHeader), 1, iqmFile);
 
@@ -3546,12 +3547,15 @@ static Model LoadGLTF(const char *fileName)
           - Supports embedded (base64) or external textures
           - Loads all raylib supported material textures, values and colors
           - Supports multiple mesh per model and multiple primitives per model
+          - Loading joints for a single skin
+          - Primitive(Mesh) weight and joints
 
         Some restrictions (not exhaustive):
           - Triangle-only meshes
           - Not supported node hierarchies or transforms
           - Only supports unsigned short indices (no byte/unsigned int)
           - Only supports float for texture coordinates (no byte/unsigned short)
+          - Multiple skins (armatures)
 
     *************************************************************************************/
 
@@ -3601,6 +3605,30 @@ static Model LoadGLTF(const char *fileName)
         model.meshMaterial = RL_MALLOC(model.meshCount*sizeof(int));
 
         for (int i = 0; i < model.meshCount; i++) model.meshes[i].vboId = (unsigned int *)RL_CALLOC(DEFAULT_MESH_VERTEX_BUFFERS, sizeof(unsigned int));
+
+        // Currenly only support one skin
+        model.boneCount = data->skins[0].joints_count;
+        model.bones = RL_CALLOC(model.boneCount, sizeof(BoneInfo));
+        model.bindPose = RL_CALLOC(model.boneCount, sizeof(Transform));
+        for (int i = 0; i < model.boneCount; i++) 
+        {
+            if (data->skins[0].joints[i]->name) {
+                // Raylib only supports names up to 34 characters..
+                if (TextLength(data->skins[0].joints[i]->name) <= 34) {
+                    TextCopy(model.bones[i].name, data->skins[0].joints[i]->name); 
+                }
+            }
+        }
+
+        for (int i = 0; i < model.boneCount; i++)  {
+            // Mark parents in array
+            if (data->skins[0].joints[i]->children_count > 0) {
+                int numOfChildrenJoints = data->skins[0].joints[i]->children_count; 
+                for (int j = i; j < numOfChildrenJoints; j++) {
+                    model.bones[j].parent = i;
+                }
+            }
+        }
 
         for (int i = 0; i < model.materialCount - 1; i++)
         {
@@ -3672,27 +3700,37 @@ static Model LoadGLTF(const char *fileName)
 
         int primitiveIndex = 0;
 
-        for (unsigned int i = 0; i < data->meshes_count; i++)
+        // For each Mesh
+        for (int i = 0; i < data->meshes_count; i++)
         {
-            for (unsigned int p = 0; p < data->meshes[i].primitives_count; p++)
+            // For each primitive in mesh
+            for (int p = 0; p < data->meshes[i].primitives_count; p++)
             {
-                for (unsigned int j = 0; j < data->meshes[i].primitives[p].attributes_count; j++)
+                // For each primitive attribute in mesh
+                for (int j = 0; j < data->meshes[i].primitives[p].attributes_count; j++)
                 {
+                    // If primitive attribute is position type
                     if (data->meshes[i].primitives[p].attributes[j].type == cgltf_attribute_type_position)
                     {
                         cgltf_accessor *acc = data->meshes[i].primitives[p].attributes[j].data;
                         model.meshes[primitiveIndex].vertexCount = (int)acc->count;
                         model.meshes[primitiveIndex].vertices = RL_MALLOC(sizeof(float)*model.meshes[primitiveIndex].vertexCount*3);
+                        model.meshes[primitiveIndex].animVertices = RL_MALLOC(sizeof(float)*model.meshes[primitiveIndex].vertexCount*3);
 
                         LOAD_ACCESSOR(float, 3, acc, model.meshes[primitiveIndex].vertices)
                     }
+
+                    // If primitive attribute is normal type
                     else if (data->meshes[i].primitives[p].attributes[j].type == cgltf_attribute_type_normal)
                     {
                         cgltf_accessor *acc = data->meshes[i].primitives[p].attributes[j].data;
                         model.meshes[primitiveIndex].normals = RL_MALLOC(sizeof(float)*acc->count*3);
+                        model.meshes[primitiveIndex].animNormals = RL_MALLOC(sizeof(float)*model.meshes[primitiveIndex].vertexCount*3);
 
                         LOAD_ACCESSOR(float, 3, acc, model.meshes[primitiveIndex].normals)
                     }
+
+                    // If primitive attribute is texcoord type
                     else if (data->meshes[i].primitives[p].attributes[j].type == cgltf_attribute_type_texcoord)
                     {
                         cgltf_accessor *acc = data->meshes[i].primitives[p].attributes[j].data;
@@ -3707,6 +3745,22 @@ static Model LoadGLTF(const char *fileName)
                             // TODO: Support normalized unsigned byte/unsigned short texture coordinates
                             TRACELOG(LOG_WARNING, "MODEL: [%s] glTF texture coordinates must be float", fileName);
                         }
+                    }
+
+                    // If primitive attribute is weight type (Up to 4 bones can influence the weight)
+                    else if (data->meshes[i].primitives[p].attributes[j].type == cgltf_attribute_type_weights)
+                    {
+                        cgltf_accessor *acc = data->meshes[i].primitives[p].attributes[j].data;
+                        model.meshes[primitiveIndex].boneWeights = RL_MALLOC(sizeof(float) * acc->count * 4);
+                        LOAD_ACCESSOR(float, 4, acc, model.meshes[primitiveIndex].boneWeights);
+                    }
+
+                    // If primitive attribute is joint type (Up to four joints can influence vertex)
+                    else if (data->meshes[i].primitives[p].attributes[j].type == cgltf_attribute_type_joints)
+                    {
+                        cgltf_accessor *acc = data->meshes[i].primitives[p].attributes[j].data;
+                        model.meshes[primitiveIndex].boneIds = RL_MALLOC(sizeof(int) * acc->count * 4);
+                        LOAD_ACCESSOR(int, 4, acc, model.meshes[primitiveIndex].boneIds);
                     }
                 }
 
